@@ -33,7 +33,7 @@ JOIN_PATTERN = re.compile(r"! Joining game '[0-9a-fA-F-]{36}' place (\d+) at")
 LEAVE_PATTERN = re.compile(r"! Leaving")
 
 
-# ==== HTTP(urllib.requestのみ使用。Roblox APIへのアクセス用) ====
+# ==== HTTP ====
 def http_get_json(url):
     req = urlrequest.Request(url, headers={"User-Agent": "AzqTracker/1.0"})
     with urlrequest.urlopen(req, timeout=5) as resp:
@@ -42,8 +42,6 @@ def http_get_json(url):
 
 # ==== Windowsスタートアップ登録 ====
 def get_startup_command():
-    """コンソールを表示せずに起動するコマンドを組み立てる。
-    exe化されている場合はexe自身、Pythonスクリプトの場合はpythonw.exeを使う"""
     if getattr(sys, "frozen", False):
         return f'"{SCRIPT_PATH}"'
 
@@ -133,14 +131,12 @@ def get_game_icon_url(universe_id):
     return None
 
 
-# ==== Discordとの通信(asyncioの名前付きパイプ機能のみで自前実装。pypresence不要) ====
+# ==== Discordとの通信 ====
 class DiscordIPCError(Exception):
     pass
 
 
 class DiscordIPC:
-    """Discordのローカル名前付きパイプと直接通信するクラス。
-    プロトコルはDiscord公開のRPC仕様(4byteオペコード+4byte長さ+JSON)そのまま。"""
 
     def __init__(self, client_id, loop):
         self.client_id = client_id
@@ -396,169 +392,44 @@ PAGE_HTML = """<!DOCTYPE html>
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Azq Tracker</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Roboto:wght@400;500;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
-  :root {
-    --md-primary: #6C79F7;
-    --md-on-primary: #10123A;
-    --md-primary-container: #2B2E77;
-    --md-on-primary-container: #DEE0FF;
-
-    --md-secondary: #FF7A59;
-    --md-on-secondary-container: #FFDBCE;
-    --md-secondary-container: #58230F;
-
-    --md-tertiary: #5FDDB0;
-    --md-error: #FF6B6B;
-
-    --md-background: #101116;
-    --md-surface-container: #1C1E26;
-    --md-surface-container-high: #24262F;
-    --md-surface-container-highest: #2C2F3A;
-    --md-on-surface: #E4E2EA;
-    --md-on-surface-variant: #A8A9B8;
-    --md-outline-variant: #2A2C36;
-
-    --font-display: "Space Grotesk", "Roboto", sans-serif;
-    --font-body: "Roboto", "Hiragino Sans", sans-serif;
-    --font-mono: "Roboto Mono", monospace;
-
-    --elevation-1: 0 1px 2px rgba(0,0,0,0.45), 0 1px 3px 1px rgba(0,0,0,0.30);
-    --elevation-2: 0 1px 2px rgba(0,0,0,0.5), 0 2px 6px 2px rgba(0,0,0,0.35);
-  }
-  * { box-sizing: border-box; }
-  body {
-    font-family: var(--font-body);
-    background: var(--md-background);
-    color: var(--md-on-surface);
-    margin: 0;
-    padding: 32px 20px 60px;
-    line-height: 1.6;
-  }
-  .wrap { max-width: 640px; margin: 0 auto; }
-  .brand {
-    display: flex; align-items: center; gap: 10px;
-    font-family: var(--font-display); font-weight: 600; font-size: 19px;
-    margin-bottom: 28px;
-  }
-  .brand .mark {
-    width: 28px; height: 28px; border-radius: 8px;
-    background: linear-gradient(135deg, var(--md-primary), var(--md-secondary));
-    display: inline-block;
-  }
-  .card {
-    background: var(--md-surface-container);
-    border: 1px solid var(--md-outline-variant);
-    border-radius: 20px;
-    padding: 20px 22px;
-    margin-bottom: 16px;
-  }
-  .card h2 {
-    font-family: var(--font-display);
-    font-size: 13px; font-weight: 600;
-    color: var(--md-on-surface-variant);
-    margin: 0 0 12px;
-    text-transform: none;
-  }
-  .row { font-size: 14.5px; margin: 6px 0; display: flex; gap: 6px; }
-  .row .label { color: var(--md-on-surface-variant); }
-  #discord-status.ok { color: var(--md-tertiary); font-weight: 500; }
-  #discord-status.off { color: var(--md-on-surface-variant); font-weight: 500; }
-
-  .btn {
-    font-family: var(--font-body); font-weight: 500; font-size: 14px;
-    border: none; cursor: pointer;
-    padding: 11px 22px; border-radius: 100px;
-    margin-right: 8px; margin-bottom: 4px;
-    transition: box-shadow 140ms ease, transform 140ms ease, background 140ms ease, opacity 140ms ease;
-  }
-  .btn-filled { background: var(--md-primary); color: var(--md-on-primary); box-shadow: var(--elevation-1); }
-  .btn-filled:hover { box-shadow: var(--elevation-2); transform: translateY(-1px); }
-  .btn-tonal { background: var(--md-surface-container-high); color: var(--md-on-surface); }
-  .btn-tonal:hover { background: var(--md-surface-container-highest); }
-  .btn-danger { background: var(--md-secondary-container); color: var(--md-on-secondary-container); }
-  .btn-danger:hover { box-shadow: var(--elevation-2); }
-  .btn:disabled { opacity: 0.4; cursor: default; box-shadow: none; transform: none; }
-
-  .switch-row {
-    display: flex; align-items: center; justify-content: space-between;
-    font-size: 14px;
-  }
-  .switch {
-    position: relative; width: 40px; height: 24px; flex-shrink: 0;
-  }
-  .switch input { opacity: 0; width: 0; height: 0; }
-  .switch .track {
-    position: absolute; inset: 0; background: var(--md-surface-container-highest);
-    border: 1px solid var(--md-outline-variant); border-radius: 100px;
-    transition: background 160ms ease;
-  }
-  .switch .thumb {
-    position: absolute; top: 3px; left: 3px; width: 16px; height: 16px;
-    background: var(--md-on-surface-variant); border-radius: 50%;
-    transition: transform 160ms ease, background 160ms ease;
-  }
-  .switch input:checked + .track { background: var(--md-primary); border-color: var(--md-primary); }
-  .switch input:checked + .track .thumb { transform: translateX(16px); background: var(--md-on-primary); }
-
-  #log {
-    background: var(--md-background);
-    border-radius: 14px;
-    padding: 12px 14px;
-    height: 320px;
-    overflow-y: auto;
-    font-family: var(--font-mono);
-    font-size: 12.5px;
-    color: var(--md-on-surface-variant);
-    white-space: pre-wrap;
-    line-height: 1.7;
-  }
+  body { font-family: sans-serif; background: #1e1f22; color: #e3e3e3; margin: 0; padding: 20px; }
+  h1 { font-size: 20px; }
+  .box { background: #2b2d31; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; }
+  .row { margin: 4px 0; }
+  button { background: #5865F2; color: white; border: none; padding: 8px 16px;
+           border-radius: 6px; margin-right: 8px; cursor: pointer; font-size: 14px; }
+  button:disabled { background: #444; cursor: default; }
+  button.danger { background: #da373c; }
+  #log { background: #111214; border-radius: 8px; padding: 10px; height: 320px;
+         overflow-y: auto; font-family: monospace; font-size: 13px; white-space: pre-wrap; }
 </style>
 </head>
 <body>
-<div class="wrap">
-  <div class="brand"><span class="mark"></span>Azq Tracker</div>
-
-  <div class="card">
-    <h2>ステータス</h2>
-    <div class="row"><span class="label">Discord:</span> <span id="discord-status" class="off">未接続</span></div>
-    <div class="row"><span class="label">プレイ中のゲーム:</span> <span id="game-status">なし</span></div>
+  <h1>Azq Tracker</h1>
+  <div class="box">
+    <div class="row">Discord: <span id="discord-status">未接続</span></div>
+    <div class="row">プレイ中のゲーム: <span id="game-status">なし</span></div>
   </div>
-
-  <div class="card">
-    <button id="start-btn" class="btn btn-filled">開始</button>
-    <button id="stop-btn" class="btn btn-tonal">停止</button>
-    <button id="exit-btn" class="btn btn-danger">アプリを終了</button>
+  <div class="box">
+    <button id="start-btn">開始</button>
+    <button id="stop-btn">停止</button>
+    <button id="exit-btn" class="danger">アプリを終了</button>
   </div>
-
-  <div class="card">
-    <div class="switch-row">
-      <span>Windows起動時に自動的に起動する</span>
-      <label class="switch">
-        <input type="checkbox" id="startup-check">
-        <span class="track"><span class="thumb"></span></span>
-      </label>
-    </div>
+  <div class="box">
+    <label><input type="checkbox" id="startup-check"> Windows起動時に自動的に起動する</label>
   </div>
-
-  <div class="card">
-    <h2>ログ</h2>
+  <div class="box">
     <div id="log"></div>
   </div>
-</div>
 
 <script>
 async function poll() {
   try {
     const res = await fetch('/api/status');
     const data = await res.json();
-    const statusEl = document.getElementById('discord-status');
-    statusEl.textContent = data.connected ? '接続済み' : '未接続';
-    statusEl.className = data.connected ? 'ok' : 'off';
+    document.getElementById('discord-status').textContent = data.connected ? '接続済み' : '未接続';
     document.getElementById('game-status').textContent = data.game || 'なし';
     const logEl = document.getElementById('log');
     logEl.textContent = data.logs.join('\\n');
@@ -569,7 +440,7 @@ document.getElementById('start-btn').onclick = () => fetch('/api/start');
 document.getElementById('stop-btn').onclick = () => fetch('/api/stop');
 document.getElementById('exit-btn').onclick = () => {
   fetch('/api/exit');
-  document.body.innerHTML = '<div class="wrap"><div class="brand"><span class="mark"></span>Azq Tracker</div><div class="card">Azq Trackerを終了しました。このタブは閉じて構いません。</div></div>';
+  document.body.innerHTML = '<h1>Azq Trackerを終了しました。このタブは閉じて構いません。</h1>';
 };
 
 const startupCheck = document.getElementById('startup-check');
