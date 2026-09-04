@@ -31,31 +31,56 @@ SETTINGS_FILE = os.path.join(os.path.dirname(SCRIPT_PATH), "azq_tracker_settings
 
 LOG_DIR = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Roblox", "logs")
 
-JOIN_PATTERN = re.compile(r"! Joining game '[0-9a-fA-F-]{36}' place (\d+) at")
+JOIN_PATTERN = re.compile(r"! Joining game '([0-9a-fA-F-]{36})' place (\d+) at")
 LEAVE_PATTERN = re.compile(r"! Leaving")
 
 
-# ==== 画面設定(言語)の保存・読み込み ====
-def load_lang():
+# ==== 画面設定(言語・サーバー参加ボタンの許可)の保存・読み込み ====
+DEFAULT_SETTINGS = {"lang": "ja", "allow_join": False}
+
+
+def load_settings():
+    settings = dict(DEFAULT_SETTINGS)
     if os.path.exists(SETTINGS_FILE):
         try:
             with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            lang = data.get("lang")
-            if lang in ("ja", "en"):
-                return lang
+            if data.get("lang") in ("ja", "en"):
+                settings["lang"] = data["lang"]
+            if isinstance(data.get("allow_join"), bool):
+                settings["allow_join"] = data["allow_join"]
         except Exception:
             pass
-    return "ja"
+    return settings
 
 
-def save_lang(lang):
+def save_settings(settings):
     try:
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-            json.dump({"lang": lang}, f)
+            json.dump(settings, f)
         return True
     except Exception:
         return False
+
+
+def load_lang():
+    return load_settings()["lang"]
+
+
+def save_lang(lang):
+    settings = load_settings()
+    settings["lang"] = lang
+    return save_settings(settings)
+
+
+def is_join_enabled():
+    return load_settings()["allow_join"]
+
+
+def set_join_enabled(enable):
+    settings = load_settings()
+    settings["allow_join"] = bool(enable)
+    return save_settings(settings)
 
 
 # ==== HTTP(urllib.requestのみ使用。Roblox APIへのアクセス用) ====
@@ -116,7 +141,10 @@ def set_startup(enable):
 
 
 def find_latest_log():
+    """Robloxプレイヤーの最新ログを探す。Roblox Studioのログ
+    (ファイル名に'studio'を含む)は対象外にする"""
     files = glob.glob(os.path.join(LOG_DIR, "*.log"))
+    files = [f for f in files if "studio" not in os.path.basename(f).lower()]
     if not files:
         return None
     return max(files, key=os.path.getmtime)
@@ -129,16 +157,22 @@ def get_game_info(place_id):
         )
         universe_id = data.get("universeId")
         if not universe_id:
-            return f"Place {place_id}", None
+            return f"Place {place_id}", None, "Roblox"
 
         data2 = http_get_json(
             f"https://games.roblox.com/v1/games?universeIds={universe_id}"
         )
         games = data2.get("data", [])
-        name = games[0].get("name", f"Place {place_id}") if games else f"Place {place_id}"
-        return name, universe_id
+        if games:
+            name = games[0].get("name", f"Place {place_id}")
+            creator = games[0].get("creator", {})
+            creator_name = creator.get("name", "Roblox")
+        else:
+            name = f"Place {place_id}"
+            creator_name = "Roblox"
+        return name, universe_id, creator_name
     except Exception:
-        return f"Place {place_id}", None
+        return f"Place {place_id}", None, "Roblox"
 
 
 def get_game_icon_url(universe_id):
@@ -267,6 +301,12 @@ class SharedState:
 
 
 # ==== トラッカー本体(バックグラウンドスレッド + asyncioで動く) ====
+RPC_BUTTON_TEXT = {
+    "ja": {"view": "ゲームを見る", "join": "ゲームに参加", "dl": "DL AzqTracker"},
+    "en": {"view": "View Game", "join": "Join Game", "dl": "Download AzqTracker"},
+}
+
+
 class AzqTracker:
     def __init__(self, state: SharedState):
         self.state = state
@@ -315,22 +355,38 @@ class AzqTracker:
                 await self._sleep(5)
         return False
 
-    async def _update_presence(self, game_name, universe_id, place_id):
+    async def _update_presence(self, game_name, universe_id, place_id, job_id, creator_name):
         icon_url = await self.loop.run_in_executor(None, get_game_icon_url, universe_id)
         large_image = icon_url if icon_url else LARGE_IMAGE_KEY
+
+        lang = await self.loop.run_in_executor(None, load_lang)
+        texts = RPC_BUTTON_TEXT.get(lang, RPC_BUTTON_TEXT["ja"])
+
+        allow_join = await self.loop.run_in_executor(None, is_join_enabled)
+        if allow_join:
+            game_button = {
+                "label": texts["join"],
+                "url": f"https://www.roblox.com/games/start?placeId={place_id}&gameInstanceId={job_id}",
+            }
+        else:
+            game_button = {
+                "label": texts["view"],
+                "url": f"https://www.roblox.com/games/{place_id}",
+            }
+
         activity = {
             "details": game_name,
-            "state": "Roblox",
+            "state": creator_name,
             "timestamps": {"start": int(time.time())},
             "assets": {
                 "large_image": large_image,
                 "large_text": game_name,
                 "small_image": LARGE_IMAGE_KEY,
-                "small_text": "Roblox",
+                "small_text": "AzqTracker",
             },
             "buttons": [
-                {"label": "ゲームを見る", "url": f"https://www.roblox.com/games/{place_id}"},
-                {"label": "DL AzqTracker", "url": "https://azqtracker.f5.si/"},
+                game_button,
+                {"label": texts["dl"], "url": "https://azqtracker.f5.si/"},
             ],
         }
         try:
@@ -376,13 +432,14 @@ class AzqTracker:
                     for line in new_lines:
                         m = JOIN_PATTERN.search(line)
                         if m:
-                            place_id = m.group(1)
-                            game_name, universe_id = await self.loop.run_in_executor(
+                            job_id = m.group(1)
+                            place_id = m.group(2)
+                            game_name, universe_id, creator_name = await self.loop.run_in_executor(
                                 None, get_game_info, place_id
                             )
                             if game_name != self.playing:
                                 self.playing = game_name
-                                await self._update_presence(game_name, universe_id, place_id)
+                                await self._update_presence(game_name, universe_id, place_id, job_id, creator_name)
                         elif LEAVE_PATTERN.search(line) and self.playing:
                             self.playing = None
                             await self._clear_presence()
@@ -542,6 +599,10 @@ PAGE_HTML = """<!DOCTYPE html>
   }
   .switch input:checked + .track { background: var(--md-primary); border-color: var(--md-primary); }
   .switch input:checked + .track .thumb { transform: translateX(16px); background: var(--md-on-primary); }
+  .hint {
+    font-size: 12px; color: var(--md-on-surface-variant);
+    margin: 10px 0 0;
+  }
 
   #log {
     background: var(--md-background);
@@ -587,6 +648,14 @@ PAGE_HTML = """<!DOCTYPE html>
         <span class="track"><span class="thumb"></span></span>
       </label>
     </div>
+    <div class="switch-row" style="margin-top:14px;">
+      <span data-i18n="join_label"></span>
+      <label class="switch">
+        <input type="checkbox" id="join-check">
+        <span class="track"><span class="thumb"></span></span>
+      </label>
+    </div>
+    <p class="hint" data-i18n="join_hint"></p>
   </div>
 
   <div class="card">
@@ -608,6 +677,8 @@ const translations = {
     btn_stop: "停止",
     btn_exit: "アプリを終了",
     startup_label: "Windows起動時に自動的に起動する",
+    join_label: "友達がDiscordから同じサーバーに参加できるボタンを表示する",
+    join_hint: "オンにすると、Discordの「ゲームを見る」ボタンが「ゲームに参加」になり、今いる同じサーバーに直接参加できるリンクになります。",
     log_title: "ログ",
     exit_message: "Azq Trackerを終了しました。このタブは閉じて構いません。"
   },
@@ -622,6 +693,8 @@ const translations = {
     btn_stop: "Stop",
     btn_exit: "Exit app",
     startup_label: "Launch automatically at Windows startup",
+    join_label: "Let friends join your exact server from Discord",
+    join_hint: "When on, the \\"View Game\\" button on Discord becomes \\"Join Game\\" and links directly into the server you're currently on.",
     log_title: "Log",
     exit_message: "Azq Tracker has exited. You can close this tab."
   }
@@ -675,6 +748,13 @@ fetch('/api/startup_status').then(r => r.json()).then(d => { startupCheck.checke
 startupCheck.onchange = () => {
   const url = startupCheck.checked ? '/api/startup_enable' : '/api/startup_disable';
   fetch(url).then(r => r.json()).then(d => { startupCheck.checked = d.enabled; });
+};
+
+const joinCheck = document.getElementById('join-check');
+fetch('/api/join_status').then(r => r.json()).then(d => { joinCheck.checked = d.enabled; });
+joinCheck.onchange = () => {
+  const url = joinCheck.checked ? '/api/join_enable' : '/api/join_disable';
+  fetch(url).then(r => r.json()).then(d => { joinCheck.checked = d.enabled; });
 };
 
 fetch('/api/lang_get').then(r => r.json()).then(d => applyLang(d.lang || 'ja'));
@@ -751,6 +831,17 @@ class AppServer:
                         lang = "ja"
                     ok = save_lang(lang)
                     body = json.dumps({"ok": ok, "lang": load_lang()}).encode("utf-8")
+                    self._send(200, "application/json", body)
+                elif self.path.startswith("/api/join_status"):
+                    body = json.dumps({"enabled": is_join_enabled()}).encode("utf-8")
+                    self._send(200, "application/json", body)
+                elif self.path.startswith("/api/join_enable"):
+                    ok = set_join_enabled(True)
+                    body = json.dumps({"ok": ok, "enabled": is_join_enabled()}).encode("utf-8")
+                    self._send(200, "application/json", body)
+                elif self.path.startswith("/api/join_disable"):
+                    ok = set_join_enabled(False)
+                    body = json.dumps({"ok": ok, "enabled": is_join_enabled()}).encode("utf-8")
                     self._send(200, "application/json", body)
                 elif self.path.startswith("/api/start"):
                     server.start_tracker()
