@@ -4,6 +4,7 @@ import json
 import os
 import re
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -12,33 +13,37 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib import request as urlrequest
 from urllib.parse import urlparse, parse_qs
 from urllib.error import URLError
-
 try:
     import winreg
 except ImportError:
     winreg = None
-
-CLIENT_ID = "1469972396336353451"  # Discordアプリケーション ID(固定)
-LARGE_IMAGE_KEY = "roblox_logo"    # Art Assetsに登録した予備アイコン名(固定)
+CLIENT_ID = "1469972396336353451"
+LARGE_IMAGE_KEY = "roblox_logo"
 POLL_INTERVAL_SEC = 2
 MAX_LOG_LINES = 300
-PORT = 47882  # 固定ポート(多重起動チェックに使うため毎回同じ番号にする)
-
+PORT = 47882
 SCRIPT_PATH = os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__)
 STARTUP_REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 STARTUP_APP_NAME = "AzqTracker"
 SETTINGS_FILE = os.path.join(os.path.dirname(SCRIPT_PATH), "azq_tracker_settings.json")
-
 LOG_DIR = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Roblox", "logs")
-
 JOIN_PATTERN = re.compile(r"! Joining game '([0-9a-fA-F-]{36})' place (\d+) at")
-LEAVE_PATTERN = re.compile(r"! Leaving")
-
-
-# ==== 画面設定(言語・サーバー参加ボタンの許可)の保存・読み込み ====
+LEAVE_PATTERN = re.compile(
+    r"(! Leaving|leaveUIGame|Disconnecting|connectionLost|Client:Disconnect|GameEnded)",
+    re.IGNORECASE
+)
+def is_roblox_running():
+    try:
+        output = subprocess.check_output(
+            'tasklist /FI "IMAGENAME eq RobloxPlayerBeta.exe"',
+            shell=True,
+            text=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+        )
+        return "RobloxPlayerBeta.exe" in output
+    except Exception:
+        return True
 DEFAULT_SETTINGS = {"lang": "ja", "allow_join": False}
-
-
 def load_settings():
     settings = dict(DEFAULT_SETTINGS)
     if os.path.exists(SETTINGS_FILE):
@@ -52,8 +57,6 @@ def load_settings():
         except Exception:
             pass
     return settings
-
-
 def save_settings(settings):
     try:
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
@@ -61,42 +64,25 @@ def save_settings(settings):
         return True
     except Exception:
         return False
-
-
 def load_lang():
     return load_settings()["lang"]
-
-
 def save_lang(lang):
     settings = load_settings()
     settings["lang"] = lang
     return save_settings(settings)
-
-
 def is_join_enabled():
     return load_settings()["allow_join"]
-
-
 def set_join_enabled(enable):
     settings = load_settings()
     settings["allow_join"] = bool(enable)
     return save_settings(settings)
-
-
-# ==== HTTP(urllib.requestのみ使用。Roblox APIへのアクセス用) ====
 def http_get_json(url):
     req = urlrequest.Request(url, headers={"User-Agent": "AzqTracker/1.0"})
     with urlrequest.urlopen(req, timeout=5) as resp:
         return json.loads(resp.read().decode("utf-8"))
-
-
-# ==== Windowsスタートアップ登録 ====
 def get_startup_command():
-    """コンソールを表示せずに起動するコマンドを組み立てる。
-    exe化されている場合はexe自身、Pythonスクリプトの場合はpythonw.exeを使う"""
     if getattr(sys, "frozen", False):
         return f'"{SCRIPT_PATH}"'
-
     exe = sys.executable
     pythonw = exe
     if exe.lower().endswith("python.exe"):
@@ -104,8 +90,6 @@ def get_startup_command():
         if os.path.exists(candidate):
             pythonw = candidate
     return f'"{pythonw}" "{SCRIPT_PATH}"'
-
-
 def is_startup_enabled():
     if winreg is None:
         return False
@@ -120,8 +104,6 @@ def is_startup_enabled():
             winreg.CloseKey(key)
     except Exception:
         return False
-
-
 def set_startup(enable):
     if winreg is None:
         return False
@@ -138,18 +120,12 @@ def set_startup(enable):
         return True
     except Exception:
         return False
-
-
 def find_latest_log():
-    """Robloxプレイヤーの最新ログを探す。Roblox Studioのログ
-    (ファイル名に'studio'を含む)は対象外にする"""
     files = glob.glob(os.path.join(LOG_DIR, "*.log"))
     files = [f for f in files if "studio" not in os.path.basename(f).lower()]
     if not files:
         return None
     return max(files, key=os.path.getmtime)
-
-
 def get_game_info(place_id):
     try:
         data = http_get_json(
@@ -158,7 +134,6 @@ def get_game_info(place_id):
         universe_id = data.get("universeId")
         if not universe_id:
             return f"Place {place_id}", None, "Roblox"
-
         data2 = http_get_json(
             f"https://games.roblox.com/v1/games?universeIds={universe_id}"
         )
@@ -173,8 +148,6 @@ def get_game_info(place_id):
         return name, universe_id, creator_name
     except Exception:
         return f"Place {place_id}", None, "Roblox"
-
-
 def get_game_icon_url(universe_id):
     if not universe_id:
         return None
@@ -190,23 +163,14 @@ def get_game_icon_url(universe_id):
     except Exception:
         pass
     return None
-
-
-# ==== Discordとの通信(asyncioの名前付きパイプ機能のみで自前実装。pypresence不要) ====
 class DiscordIPCError(Exception):
     pass
-
-
 class DiscordIPC:
-    """Discordのローカル名前付きパイプと直接通信するクラス。
-    プロトコルはDiscord公開のRPC仕様(4byteオペコード+4byte長さ+JSON)そのまま。"""
-
     def __init__(self, client_id, loop):
         self.client_id = client_id
         self.loop = loop
         self.reader = None
         self.writer = None
-
     @staticmethod
     def _find_pipe():
         base = r"\\?\pipe"
@@ -217,35 +181,29 @@ class DiscordIPC:
         except FileNotFoundError:
             pass
         return None
-
     async def connect(self):
         path = self._find_pipe()
         if not path:
             raise DiscordIPCError("Discordが見つかりません(起動していますか?)")
-
         self.reader = asyncio.StreamReader(loop=self.loop)
         protocol = asyncio.StreamReaderProtocol(self.reader, loop=self.loop)
         transport, _ = await asyncio.wait_for(
             self.loop.create_pipe_connection(lambda: protocol, path), timeout=10
         )
         self.writer = asyncio.StreamWriter(transport, protocol, self.reader, self.loop)
-
         await self._send(0, {"v": 1, "client_id": self.client_id})
         resp = await self._read()
         if resp.get("evt") == "ERROR":
             raise DiscordIPCError(resp.get("data", {}).get("message", "handshake failed"))
-
     async def _send(self, op, payload):
         data = json.dumps(payload).encode("utf-8")
         self.writer.write(struct.pack("<II", op, len(data)) + data)
         await self.writer.drain()
-
     async def _read(self):
         header = await asyncio.wait_for(self.reader.readexactly(8), timeout=10)
         op, length = struct.unpack("<II", header)
         data = await asyncio.wait_for(self.reader.readexactly(length), timeout=10)
         return json.loads(data.decode("utf-8"))
-
     async def set_activity(self, activity):
         payload = {
             "cmd": "SET_ACTIVITY",
@@ -254,7 +212,6 @@ class DiscordIPC:
         }
         await self._send(1, payload)
         return await self._read()
-
     async def clear_activity(self):
         payload = {
             "cmd": "SET_ACTIVITY",
@@ -263,34 +220,27 @@ class DiscordIPC:
         }
         await self._send(1, payload)
         return await self._read()
-
     async def close(self):
         try:
             self.writer.close()
         except Exception:
             pass
-
-
-# ==== 画面(ブラウザ)とやり取りするための共有状態 ====
 class SharedState:
     def __init__(self):
         self.lock = threading.Lock()
         self.connected = False
         self.game_name = None
         self.log_lines = []
-
     def add_log(self, message):
         with self.lock:
             timestamp = time.strftime("%H:%M:%S")
             self.log_lines.append(f"[{timestamp}] {message}")
             if len(self.log_lines) > MAX_LOG_LINES:
                 self.log_lines = self.log_lines[-MAX_LOG_LINES:]
-
     def set_status(self, connected, game_name):
         with self.lock:
             self.connected = connected
             self.game_name = game_name
-
     def snapshot(self):
         with self.lock:
             return {
@@ -298,15 +248,10 @@ class SharedState:
                 "game": self.game_name,
                 "logs": list(self.log_lines),
             }
-
-
-# ==== トラッカー本体(バックグラウンドスレッド + asyncioで動く) ====
 RPC_BUTTON_TEXT = {
     "ja": {"view": "ゲームを見る", "join": "ゲームに参加", "dl": "DL AzqTracker"},
     "en": {"view": "View Game", "join": "Join Game", "dl": "Download AzqTracker"},
 }
-
-
 class AzqTracker:
     def __init__(self, state: SharedState):
         self.state = state
@@ -316,16 +261,12 @@ class AzqTracker:
         self.stop_event = threading.Event()
         self.loop = None
         self.ipc = None
-
     def log(self, message):
         self.state.add_log(message)
-
     def set_status(self, connected, game_name):
         self.state.set_status(connected, game_name)
-
     def stop(self):
         self.stop_event.set()
-
     def run(self):
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
@@ -333,14 +274,12 @@ class AzqTracker:
             self.loop.run_until_complete(self._main())
         finally:
             self.loop.close()
-
     async def _sleep(self, seconds):
         step = 0.5
         elapsed = 0
         while elapsed < seconds and not self.stop_event.is_set():
             await asyncio.sleep(min(step, seconds - elapsed))
             elapsed += step
-
     async def _connect_discord(self):
         while not self.stop_event.is_set():
             try:
@@ -354,14 +293,11 @@ class AzqTracker:
                 self.set_status(False, None)
                 await self._sleep(5)
         return False
-
     async def _update_presence(self, game_name, universe_id, place_id, job_id, creator_name):
         icon_url = await self.loop.run_in_executor(None, get_game_icon_url, universe_id)
         large_image = icon_url if icon_url else LARGE_IMAGE_KEY
-
         lang = await self.loop.run_in_executor(None, load_lang)
         texts = RPC_BUTTON_TEXT.get(lang, RPC_BUTTON_TEXT["ja"])
-
         allow_join = await self.loop.run_in_executor(None, is_join_enabled)
         if allow_join:
             game_button = {
@@ -373,7 +309,6 @@ class AzqTracker:
                 "label": texts["view"],
                 "url": f"https://www.roblox.com/games/{place_id}",
             }
-
         activity = {
             "details": game_name,
             "state": creator_name,
@@ -396,7 +331,6 @@ class AzqTracker:
         except Exception:
             self.log("Discordとの接続が切れました。再接続します...")
             await self._connect_discord()
-
     async def _clear_presence(self):
         try:
             await self.ipc.clear_activity()
@@ -404,7 +338,6 @@ class AzqTracker:
             self.set_status(True, None)
         except Exception:
             pass
-
     def _read_new_lines(self, path):
         try:
             with open(path, "r", encoding="utf-8", errors="ignore") as f:
@@ -414,21 +347,24 @@ class AzqTracker:
             return lines, pos
         except FileNotFoundError:
             return [], self.log_pos
-
     async def _watch_logs(self):
         while not self.stop_event.is_set():
             try:
+                if self.playing and not await self.loop.run_in_executor(None, is_roblox_running):
+                    self.playing = None
+                    await self._clear_presence()
                 latest = await self.loop.run_in_executor(None, find_latest_log)
                 if latest != self.current_log:
                     self.current_log = latest
-                    self.log_pos = 0
-
+                    if latest and os.path.exists(latest):
+                        self.log_pos = os.path.getsize(latest)
+                    else:
+                        self.log_pos = 0
                 if latest:
                     new_lines, new_pos = await self.loop.run_in_executor(
                         None, self._read_new_lines, latest
                     )
                     self.log_pos = new_pos
-
                     for line in new_lines:
                         m = JOIN_PATTERN.search(line)
                         if m:
@@ -445,9 +381,7 @@ class AzqTracker:
                             await self._clear_presence()
             except Exception as e:
                 self.log(f"エラーが発生しましたが継続します: {e}")
-
             await self._sleep(POLL_INTERVAL_SEC)
-
     async def _main(self):
         if not os.path.isdir(LOG_DIR):
             self.log(f"Robloxのログフォルダが見つかりません: {LOG_DIR}")
@@ -456,7 +390,6 @@ class AzqTracker:
                 await self._sleep(10)
             if self.stop_event.is_set():
                 return
-
         while not self.stop_event.is_set():
             try:
                 if not await self._connect_discord():
@@ -466,7 +399,6 @@ class AzqTracker:
             except Exception as e:
                 self.log(f"予期しないエラーが発生しました。5秒後に再開します: {e}")
                 await self._sleep(5)
-
         if self.ipc:
             try:
                 await self.ipc.clear_activity()
@@ -475,333 +407,35 @@ class AzqTracker:
                 pass
         self.set_status(False, None)
         self.log("停止しました")
-
-
-# ==== ブラウザに表示するページ ====
-PAGE_HTML = """<!DOCTYPE html>
-<html lang="ja">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Azq Tracker</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Roboto:wght@400;500;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
-<style>
-  :root {
-    --md-primary: #6C79F7;
-    --md-on-primary: #10123A;
-    --md-primary-container: #2B2E77;
-    --md-on-primary-container: #DEE0FF;
-
-    --md-secondary: #FF7A59;
-    --md-on-secondary-container: #FFDBCE;
-    --md-secondary-container: #58230F;
-
-    --md-tertiary: #5FDDB0;
-    --md-error: #FF6B6B;
-
-    --md-background: #101116;
-    --md-surface-container: #1C1E26;
-    --md-surface-container-high: #24262F;
-    --md-surface-container-highest: #2C2F3A;
-    --md-on-surface: #E4E2EA;
-    --md-on-surface-variant: #A8A9B8;
-    --md-outline-variant: #2A2C36;
-
-    --font-display: "Space Grotesk", "Roboto", sans-serif;
-    --font-body: "Roboto", "Hiragino Sans", sans-serif;
-    --font-mono: "Roboto Mono", monospace;
-
-    --elevation-1: 0 1px 2px rgba(0,0,0,0.45), 0 1px 3px 1px rgba(0,0,0,0.30);
-    --elevation-2: 0 1px 2px rgba(0,0,0,0.5), 0 2px 6px 2px rgba(0,0,0,0.35);
-  }
-  * { box-sizing: border-box; }
-  body {
-    font-family: var(--font-body);
-    background: var(--md-background);
-    color: var(--md-on-surface);
-    margin: 0;
-    padding: 32px 20px 60px;
-    line-height: 1.6;
-  }
-  .wrap { max-width: 640px; margin: 0 auto; }
-  .brand {
-    display: flex; align-items: center; gap: 10px;
-    font-family: var(--font-display); font-weight: 600; font-size: 19px;
-  }
-  .brand .mark {
-    width: 28px; height: 28px; border-radius: 8px;
-    background: linear-gradient(135deg, var(--md-primary), var(--md-secondary));
-    display: inline-block;
-  }
-  .lang-toggle {
-    display: flex; background: var(--md-surface-container-high);
-    border-radius: 100px; padding: 3px; gap: 2px;
-  }
-  .lang-toggle button {
-    border: none; background: transparent; color: var(--md-on-surface-variant);
-    font-family: var(--font-body); font-size: 12px; font-weight: 500;
-    padding: 6px 12px; border-radius: 100px; cursor: pointer;
-  }
-  .lang-toggle button.active { background: var(--md-primary); color: var(--md-on-primary); }
-  .card {
-    background: var(--md-surface-container);
-    border: 1px solid var(--md-outline-variant);
-    border-radius: 20px;
-    padding: 20px 22px;
-    margin-bottom: 16px;
-  }
-  .card h2 {
-    font-family: var(--font-display);
-    font-size: 13px; font-weight: 600;
-    color: var(--md-on-surface-variant);
-    margin: 0 0 12px;
-    text-transform: none;
-  }
-  .row { font-size: 14.5px; margin: 6px 0; display: flex; gap: 6px; }
-  .row .label { color: var(--md-on-surface-variant); }
-  #discord-status.ok { color: var(--md-tertiary); font-weight: 500; }
-  #discord-status.off { color: var(--md-on-surface-variant); font-weight: 500; }
-
-  .btn {
-    font-family: var(--font-body); font-weight: 500; font-size: 14px;
-    border: none; cursor: pointer;
-    padding: 11px 22px; border-radius: 100px;
-    margin-right: 8px; margin-bottom: 4px;
-    transition: box-shadow 140ms ease, transform 140ms ease, background 140ms ease, opacity 140ms ease;
-  }
-  .btn-filled { background: var(--md-primary); color: var(--md-on-primary); box-shadow: var(--elevation-1); }
-  .btn-filled:hover { box-shadow: var(--elevation-2); transform: translateY(-1px); }
-  .btn-tonal { background: var(--md-surface-container-high); color: var(--md-on-surface); }
-  .btn-tonal:hover { background: var(--md-surface-container-highest); }
-  .btn-danger { background: var(--md-secondary-container); color: var(--md-on-secondary-container); }
-  .btn-danger:hover { box-shadow: var(--elevation-2); }
-  .btn:disabled { opacity: 0.4; cursor: default; box-shadow: none; transform: none; }
-
-  .switch-row {
-    display: flex; align-items: center; justify-content: space-between;
-    font-size: 14px;
-  }
-  .switch {
-    position: relative; width: 40px; height: 24px; flex-shrink: 0;
-  }
-  .switch input { opacity: 0; width: 0; height: 0; }
-  .switch .track {
-    position: absolute; inset: 0; background: var(--md-surface-container-highest);
-    border: 1px solid var(--md-outline-variant); border-radius: 100px;
-    transition: background 160ms ease;
-  }
-  .switch .thumb {
-    position: absolute; top: 3px; left: 3px; width: 16px; height: 16px;
-    background: var(--md-on-surface-variant); border-radius: 50%;
-    transition: transform 160ms ease, background 160ms ease;
-  }
-  .switch input:checked + .track { background: var(--md-primary); border-color: var(--md-primary); }
-  .switch input:checked + .track .thumb { transform: translateX(16px); background: var(--md-on-primary); }
-  .hint {
-    font-size: 12px; color: var(--md-on-surface-variant);
-    margin: 10px 0 0;
-  }
-
-  #log {
-    background: var(--md-background);
-    border-radius: 14px;
-    padding: 12px 14px;
-    height: 320px;
-    overflow-y: auto;
-    font-family: var(--font-mono);
-    font-size: 12.5px;
-    color: var(--md-on-surface-variant);
-    white-space: pre-wrap;
-    line-height: 1.7;
-  }
-</style>
-</head>
-<body>
-<div class="wrap">
-  <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:28px;">
-    <div class="brand"><span class="mark"></span>Azq Tracker</div>
-    <div class="lang-toggle">
-      <button id="lang-ja" class="active" onclick="setLang('ja')">日本語</button>
-      <button id="lang-en" onclick="setLang('en')">English</button>
-    </div>
-  </div>
-
-  <div class="card">
-    <h2 data-i18n="status_title"></h2>
-    <div class="row"><span class="label" data-i18n="discord_label"></span> <span id="discord-status" class="off" data-i18n="status_off"></span></div>
-    <div class="row"><span class="label" data-i18n="game_label"></span> <span id="game-status" data-i18n="status_none"></span></div>
-  </div>
-
-  <div class="card">
-    <button id="start-btn" class="btn btn-filled" data-i18n="btn_start"></button>
-    <button id="stop-btn" class="btn btn-tonal" data-i18n="btn_stop"></button>
-    <button id="exit-btn" class="btn btn-danger" data-i18n="btn_exit"></button>
-  </div>
-
-  <div class="card">
-    <div class="switch-row">
-      <span data-i18n="startup_label"></span>
-      <label class="switch">
-        <input type="checkbox" id="startup-check">
-        <span class="track"><span class="thumb"></span></span>
-      </label>
-    </div>
-    <div class="switch-row" style="margin-top:14px;">
-      <span data-i18n="join_label"></span>
-      <label class="switch">
-        <input type="checkbox" id="join-check">
-        <span class="track"><span class="thumb"></span></span>
-      </label>
-    </div>
-    <p class="hint" data-i18n="join_hint"></p>
-  </div>
-
-  <div class="card">
-    <h2 data-i18n="log_title"></h2>
-    <div id="log"></div>
-  </div>
-</div>
-
-<script>
-const translations = {
-  ja: {
-    status_title: "ステータス",
-    discord_label: "Discord:",
-    game_label: "プレイ中のゲーム:",
-    status_off: "未接続",
-    status_on: "接続済み",
-    status_none: "なし",
-    btn_start: "開始",
-    btn_stop: "停止",
-    btn_exit: "アプリを終了",
-    startup_label: "Windows起動時に自動的に起動する",
-    join_label: "友達がDiscordから同じサーバーに参加できるボタンを表示する",
-    join_hint: "オンにすると、Discordの「ゲームを見る」ボタンが「ゲームに参加」になり、今いる同じサーバーに直接参加できるリンクになります。",
-    log_title: "ログ",
-    exit_message: "Azq Trackerを終了しました。このタブは閉じて構いません。"
-  },
-  en: {
-    status_title: "Status",
-    discord_label: "Discord:",
-    game_label: "Currently playing:",
-    status_off: "Not connected",
-    status_on: "Connected",
-    status_none: "None",
-    btn_start: "Start",
-    btn_stop: "Stop",
-    btn_exit: "Exit app",
-    startup_label: "Launch automatically at Windows startup",
-    join_label: "Let friends join your exact server from Discord",
-    join_hint: "When on, the \\"View Game\\" button on Discord becomes \\"Join Game\\" and links directly into the server you're currently on.",
-    log_title: "Log",
-    exit_message: "Azq Tracker has exited. You can close this tab."
-  }
-};
-
-let currentLang = "ja";
-let lastConnected = false;
-
-function applyLang(lang) {
-  currentLang = lang;
-  document.getElementById("lang-ja").classList.toggle("active", lang === "ja");
-  document.getElementById("lang-en").classList.toggle("active", lang === "en");
-  document.querySelectorAll("[data-i18n]").forEach(el => {
-    const key = el.getAttribute("data-i18n");
-    if (translations[lang][key] !== undefined) {
-      el.textContent = translations[lang][key];
-    }
-  });
-  const statusEl = document.getElementById("discord-status");
-  statusEl.textContent = lastConnected ? translations[lang].status_on : translations[lang].status_off;
-}
-
-function setLang(lang) {
-  applyLang(lang);
-  fetch('/api/lang_set?lang=' + lang);
-}
-
-async function poll() {
-  try {
-    const res = await fetch('/api/status');
-    const data = await res.json();
-    lastConnected = data.connected;
-    const statusEl = document.getElementById('discord-status');
-    statusEl.textContent = data.connected ? translations[currentLang].status_on : translations[currentLang].status_off;
-    statusEl.className = data.connected ? 'ok' : 'off';
-    document.getElementById('game-status').textContent = data.game || translations[currentLang].status_none;
-    const logEl = document.getElementById('log');
-    logEl.textContent = data.logs.join('\\n');
-    logEl.scrollTop = logEl.scrollHeight;
-  } catch (e) { /* サーバー停止中は無視 */ }
-}
-document.getElementById('start-btn').onclick = () => fetch('/api/start');
-document.getElementById('stop-btn').onclick = () => fetch('/api/stop');
-document.getElementById('exit-btn').onclick = () => {
-  fetch('/api/exit');
-  document.body.innerHTML = '<div class="wrap"><div class="brand"><span class="mark"></span>Azq Tracker</div><div class="card">' + translations[currentLang].exit_message + '</div></div>';
-};
-
-const startupCheck = document.getElementById('startup-check');
-fetch('/api/startup_status').then(r => r.json()).then(d => { startupCheck.checked = d.enabled; });
-startupCheck.onchange = () => {
-  const url = startupCheck.checked ? '/api/startup_enable' : '/api/startup_disable';
-  fetch(url).then(r => r.json()).then(d => { startupCheck.checked = d.enabled; });
-};
-
-const joinCheck = document.getElementById('join-check');
-fetch('/api/join_status').then(r => r.json()).then(d => { joinCheck.checked = d.enabled; });
-joinCheck.onchange = () => {
-  const url = joinCheck.checked ? '/api/join_enable' : '/api/join_disable';
-  fetch(url).then(r => r.json()).then(d => { joinCheck.checked = d.enabled; });
-};
-
-fetch('/api/lang_get').then(r => r.json()).then(d => applyLang(d.lang || 'ja'));
-
-setInterval(poll, 1000);
-poll();
-</script>
-</body>
-</html>
-"""
-
-
-# ==== ローカルWebサーバー ====
+PAGE_HTML =
 class AppServer:
     def __init__(self):
         self.state = SharedState()
         self.tracker = None
         self.tracker_thread = None
         self.httpd = None
-
     def start_tracker(self):
         if self.tracker is not None:
             return
         self.tracker = AzqTracker(self.state)
         self.tracker_thread = threading.Thread(target=self.tracker.run, daemon=True)
         self.tracker_thread.start()
-
     def stop_tracker(self):
         if self.tracker:
             self.state.add_log("停止しています...")
             self.tracker.stop()
             self.tracker = None
-
     def make_handler(self):
         server = self
-
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, format, *args):
-                pass  # コンソールへのアクセスログ出力を無効化
-
+                pass
             def _send(self, status, content_type, body: bytes):
                 self.send_response(status)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
-
             def do_GET(self):
                 if self.path == "/" or self.path == "":
                     self._send(200, "text/html; charset=utf-8", PAGE_HTML.encode("utf-8"))
@@ -855,42 +489,29 @@ class AppServer:
                     threading.Thread(target=server.httpd.shutdown, daemon=True).start()
                 else:
                     self._send(404, "text/plain; charset=utf-8", b"Not Found")
-
         return Handler
-
     def already_running(self, url):
-        """既に別プロセスが同じポートでサーバーを立てているか確認する"""
         try:
             req = urlrequest.Request(url + "api/ping")
             with urlrequest.urlopen(req, timeout=1) as resp:
                 return resp.status == 200
         except Exception:
             return False
-
     def run(self):
         url = f"http://127.0.0.1:{PORT}/"
-
         if self.already_running(url):
-            # 既に裏側で動いているので、新しく起動せずブラウザだけ開いて終了する
             webbrowser.open(url)
             return
-
         try:
             self.httpd = ThreadingHTTPServer(("127.0.0.1", PORT), self.make_handler())
         except OSError:
-            # ポートが他の何かに使われている場合は、念のためブラウザだけ開いてみる
             webbrowser.open(url)
             return
-
         self.start_tracker()
-
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
-
         try:
             self.httpd.serve_forever()
         finally:
             self.stop_tracker()
-
-
 if __name__ == "__main__":
     AppServer().run()
