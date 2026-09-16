@@ -27,6 +27,26 @@ STARTUP_REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 STARTUP_APP_NAME = "AzqTracker"
 SETTINGS_FILE = os.path.join(os.path.dirname(SCRIPT_PATH), "azq_tracker_settings.json")
 LOG_DIR = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Roblox", "logs")
+PACKAGES_DIR = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Packages")
+
+
+def get_log_dirs():
+    """通常版に加えて、Microsoft Store版のログフォルダも探す。
+    Store版はアプリサンドボックスの仕組みにより %LOCALAPPDATA%\\Packages\\ 配下に
+    ROBLOXCorporation.ROBLOX で始まるフォルダとしてインストールされる。
+    末尾のID部分は環境によって変わりうるため、決め打ちせず前方一致で探す。"""
+    dirs = [LOG_DIR]
+    try:
+        for name in os.listdir(PACKAGES_DIR):
+            if name.startswith("ROBLOXCorporation.ROBLOX"):
+                candidate = os.path.join(PACKAGES_DIR, name, "LocalState", "logs")
+                if os.path.isdir(candidate):
+                    dirs.append(candidate)
+    except (FileNotFoundError, NotADirectoryError, PermissionError):
+        pass
+    return dirs
+
+
 JOIN_PATTERN = re.compile(r"! Joining game '([0-9a-fA-F-]{36})' place (\d+) at")
 LEAVE_PATTERN = re.compile(
     r"(! Leaving|leaveUIGame|Disconnecting|connectionLost|Client:Disconnect|GameEnded)",
@@ -121,7 +141,9 @@ def set_startup(enable):
     except Exception:
         return False
 def find_latest_log():
-    files = glob.glob(os.path.join(LOG_DIR, "*.log"))
+    files = []
+    for log_dir in get_log_dirs():
+        files.extend(glob.glob(os.path.join(log_dir, "*.log")))
     files = [f for f in files if "studio" not in os.path.basename(f).lower()]
     if not files:
         return None
@@ -249,7 +271,7 @@ class SharedState:
                 "logs": list(self.log_lines),
             }
 RPC_BUTTON_TEXT = {
-    "ja": {"view": "ゲームを見る", "join": "ゲームに参加", "dl": "DL AzqTracker"},
+    "ja": {"view": "ゲームを見る", "join": "Join", "dl": "DL AzqTracker"},
     "en": {"view": "View Game", "join": "Join Game", "dl": "Download AzqTracker"},
 }
 class AzqTracker:
@@ -383,10 +405,10 @@ class AzqTracker:
                 self.log(f"エラーが発生しましたが継続します: {e}")
             await self._sleep(POLL_INTERVAL_SEC)
     async def _main(self):
-        if not os.path.isdir(LOG_DIR):
-            self.log(f"Robloxのログフォルダが見つかりません: {LOG_DIR}")
+        if not any(os.path.isdir(d) for d in get_log_dirs()):
+            self.log(f"Robloxのログフォルダが見つかりません: {get_log_dirs()}")
             self.log("Windows以外の環境では動作しません。フォルダが見つかるまで待機します...")
-            while not os.path.isdir(LOG_DIR) and not self.stop_event.is_set():
+            while not any(os.path.isdir(d) for d in get_log_dirs()) and not self.stop_event.is_set():
                 await self._sleep(10)
             if self.stop_event.is_set():
                 return
@@ -407,7 +429,293 @@ class AzqTracker:
                 pass
         self.set_status(False, None)
         self.log("停止しました")
-PAGE_HTML =
+PAGE_HTML = """<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Azq Tracker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Roboto:wght@400;500;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --md-primary: #6C79F7;
+    --md-on-primary: #10123A;
+    --md-primary-container: #2B2E77;
+    --md-on-primary-container: #DEE0FF;
+
+    --md-secondary: #FF7A59;
+    --md-on-secondary-container: #FFDBCE;
+    --md-secondary-container: #58230F;
+
+    --md-tertiary: #5FDDB0;
+    --md-error: #FF6B6B;
+
+    --md-background: #101116;
+    --md-surface-container: #1C1E26;
+    --md-surface-container-high: #24262F;
+    --md-surface-container-highest: #2C2F3A;
+    --md-on-surface: #E4E2EA;
+    --md-on-surface-variant: #A8A9B8;
+    --md-outline-variant: #2A2C36;
+
+    --font-display: "Space Grotesk", "Roboto", sans-serif;
+    --font-body: "Roboto", "Hiragino Sans", sans-serif;
+    --font-mono: "Roboto Mono", monospace;
+
+    --elevation-1: 0 1px 2px rgba(0,0,0,0.45), 0 1px 3px 1px rgba(0,0,0,0.30);
+    --elevation-2: 0 1px 2px rgba(0,0,0,0.5), 0 2px 6px 2px rgba(0,0,0,0.35);
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: var(--font-body);
+    background: var(--md-background);
+    color: var(--md-on-surface);
+    margin: 0;
+    padding: 32px 20px 60px;
+    line-height: 1.6;
+  }
+  .wrap { max-width: 640px; margin: 0 auto; }
+  .brand {
+    display: flex; align-items: center; gap: 10px;
+    font-family: var(--font-display); font-weight: 600; font-size: 19px;
+  }
+  .brand .mark {
+    width: 28px; height: 28px; border-radius: 8px;
+    background: linear-gradient(135deg, var(--md-primary), var(--md-secondary));
+    display: inline-block;
+  }
+  .lang-toggle {
+    display: flex; background: var(--md-surface-container-high);
+    border-radius: 100px; padding: 3px; gap: 2px;
+  }
+  .lang-toggle button {
+    border: none; background: transparent; color: var(--md-on-surface-variant);
+    font-family: var(--font-body); font-size: 12px; font-weight: 500;
+    padding: 6px 12px; border-radius: 100px; cursor: pointer;
+  }
+  .lang-toggle button.active { background: var(--md-primary); color: var(--md-on-primary); }
+  .card {
+    background: var(--md-surface-container);
+    border: 1px solid var(--md-outline-variant);
+    border-radius: 20px;
+    padding: 20px 22px;
+    margin-bottom: 16px;
+  }
+  .card h2 {
+    font-family: var(--font-display);
+    font-size: 13px; font-weight: 600;
+    color: var(--md-on-surface-variant);
+    margin: 0 0 12px;
+    text-transform: none;
+  }
+  .row { font-size: 14.5px; margin: 6px 0; display: flex; gap: 6px; }
+  .row .label { color: var(--md-on-surface-variant); }
+  #discord-status.ok { color: var(--md-tertiary); font-weight: 500; }
+  #discord-status.off { color: var(--md-on-surface-variant); font-weight: 500; }
+
+  .btn {
+    font-family: var(--font-body); font-weight: 500; font-size: 14px;
+    border: none; cursor: pointer;
+    padding: 11px 22px; border-radius: 100px;
+    margin-right: 8px; margin-bottom: 4px;
+    transition: box-shadow 140ms ease, transform 140ms ease, background 140ms ease, opacity 140ms ease;
+  }
+  .btn-filled { background: var(--md-primary); color: var(--md-on-primary); box-shadow: var(--elevation-1); }
+  .btn-filled:hover { box-shadow: var(--elevation-2); transform: translateY(-1px); }
+  .btn-tonal { background: var(--md-surface-container-high); color: var(--md-on-surface); }
+  .btn-tonal:hover { background: var(--md-surface-container-highest); }
+  .btn-danger { background: var(--md-secondary-container); color: var(--md-on-secondary-container); }
+  .btn-danger:hover { box-shadow: var(--elevation-2); }
+  .btn:disabled { opacity: 0.4; cursor: default; box-shadow: none; transform: none; }
+
+  .switch-row {
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 14px;
+  }
+  .switch {
+    position: relative; width: 40px; height: 24px; flex-shrink: 0;
+  }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch .track {
+    position: absolute; inset: 0; background: var(--md-surface-container-highest);
+    border: 1px solid var(--md-outline-variant); border-radius: 100px;
+    transition: background 160ms ease;
+  }
+  .switch .thumb {
+    position: absolute; top: 3px; left: 3px; width: 16px; height: 16px;
+    background: var(--md-on-surface-variant); border-radius: 50%;
+    transition: transform 160ms ease, background 160ms ease;
+  }
+  .switch input:checked + .track { background: var(--md-primary); border-color: var(--md-primary); }
+  .switch input:checked + .track .thumb { transform: translateX(16px); background: var(--md-on-primary); }
+  .hint {
+    font-size: 12px; color: var(--md-on-surface-variant);
+    margin: 10px 0 0;
+  }
+
+  #log {
+    background: var(--md-background);
+    border-radius: 14px;
+    padding: 12px 14px;
+    height: 320px;
+    overflow-y: auto;
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    color: var(--md-on-surface-variant);
+    white-space: pre-wrap;
+    line-height: 1.7;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:28px;">
+    <div class="brand"><span class="mark"></span>Azq Tracker</div>
+    <div class="lang-toggle">
+      <button id="lang-ja" class="active" onclick="setLang('ja')">日本語</button>
+      <button id="lang-en" onclick="setLang('en')">English</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 data-i18n="status_title"></h2>
+    <div class="row"><span class="label" data-i18n="discord_label"></span> <span id="discord-status" class="off" data-i18n="status_off"></span></div>
+    <div class="row"><span class="label" data-i18n="game_label"></span> <span id="game-status" data-i18n="status_none"></span></div>
+  </div>
+
+  <div class="card">
+    <button id="start-btn" class="btn btn-filled" data-i18n="btn_start"></button>
+    <button id="stop-btn" class="btn btn-tonal" data-i18n="btn_stop"></button>
+    <button id="exit-btn" class="btn btn-danger" data-i18n="btn_exit"></button>
+  </div>
+
+  <div class="card">
+    <div class="switch-row">
+      <span data-i18n="startup_label"></span>
+      <label class="switch">
+        <input type="checkbox" id="startup-check">
+        <span class="track"><span class="thumb"></span></span>
+      </label>
+    </div>
+    <div class="switch-row" style="margin-top:14px;">
+      <span data-i18n="join_label"></span>
+      <label class="switch">
+        <input type="checkbox" id="join-check">
+        <span class="track"><span class="thumb"></span></span>
+      </label>
+    </div>
+    <p class="hint" data-i18n="join_hint"></p>
+  </div>
+
+  <div class="card">
+    <h2 data-i18n="log_title"></h2>
+    <div id="log"></div>
+  </div>
+</div>
+
+<script>
+const translations = {
+  ja: {
+    status_title: "ステータス",
+    discord_label: "Discord:",
+    game_label: "プレイ中のゲーム:",
+    status_off: "未接続",
+    status_on: "接続済み",
+    status_none: "なし",
+    btn_start: "開始",
+    btn_stop: "停止",
+    btn_exit: "アプリを終了",
+    startup_label: "Windows起動時に自動的に起動する",
+    join_label: "友達がDiscordから同じサーバーに参加できるボタンを表示する",
+    join_hint: "オンにすると、Discordの「ゲームを見る」ボタンが「Join」になり、今いる同じサーバーに直接参加できるリンクになります。",
+    log_title: "ログ",
+    exit_message: "Azq Trackerを終了しました。このタブは閉じて構いません。"
+  },
+  en: {
+    status_title: "Status",
+    discord_label: "Discord:",
+    game_label: "Currently playing:",
+    status_off: "Not connected",
+    status_on: "Connected",
+    status_none: "None",
+    btn_start: "Start",
+    btn_stop: "Stop",
+    btn_exit: "Exit app",
+    startup_label: "Launch automatically at Windows startup",
+    join_label: "Let friends join your exact server from Discord",
+    join_hint: "When on, the \\"View Game\\" button on Discord becomes \\"Join Game\\" and links directly into the server you're currently on.",
+    log_title: "Log",
+    exit_message: "Azq Tracker has exited. You can close this tab."
+  }
+};
+
+let currentLang = "ja";
+let lastConnected = false;
+
+function applyLang(lang) {
+  currentLang = lang;
+  document.getElementById("lang-ja").classList.toggle("active", lang === "ja");
+  document.getElementById("lang-en").classList.toggle("active", lang === "en");
+  document.querySelectorAll("[data-i18n]").forEach(el => {
+    const key = el.getAttribute("data-i18n");
+    if (translations[lang][key] !== undefined) {
+      el.textContent = translations[lang][key];
+    }
+  });
+  const statusEl = document.getElementById("discord-status");
+  statusEl.textContent = lastConnected ? translations[lang].status_on : translations[lang].status_off;
+}
+
+function setLang(lang) {
+  applyLang(lang);
+  fetch('/api/lang_set?lang=' + lang);
+}
+
+async function poll() {
+  try {
+    const res = await fetch('/api/status');
+    const data = await res.json();
+    lastConnected = data.connected;
+    const statusEl = document.getElementById('discord-status');
+    statusEl.textContent = data.connected ? translations[currentLang].status_on : translations[currentLang].status_off;
+    statusEl.className = data.connected ? 'ok' : 'off';
+    document.getElementById('game-status').textContent = data.game || translations[currentLang].status_none;
+    const logEl = document.getElementById('log');
+    logEl.textContent = data.logs.join('\\n');
+    logEl.scrollTop = logEl.scrollHeight;
+  } catch (e) { /* サーバー停止中は無視 */ }
+}
+document.getElementById('start-btn').onclick = () => fetch('/api/start');
+document.getElementById('stop-btn').onclick = () => fetch('/api/stop');
+document.getElementById('exit-btn').onclick = () => {
+  fetch('/api/exit');
+  document.body.innerHTML = '<div class="wrap"><div class="brand"><span class="mark"></span>Azq Tracker</div><div class="card">' + translations[currentLang].exit_message + '</div></div>';
+};
+
+const startupCheck = document.getElementById('startup-check');
+fetch('/api/startup_status').then(r => r.json()).then(d => { startupCheck.checked = d.enabled; });
+startupCheck.onchange = () => {
+  const url = startupCheck.checked ? '/api/startup_enable' : '/api/startup_disable';
+  fetch(url).then(r => r.json()).then(d => { startupCheck.checked = d.enabled; });
+};
+
+const joinCheck = document.getElementById('join-check');
+fetch('/api/join_status').then(r => r.json()).then(d => { joinCheck.checked = d.enabled; });
+joinCheck.onchange = () => {
+  const url = joinCheck.checked ? '/api/join_enable' : '/api/join_disable';
+  fetch(url).then(r => r.json()).then(d => { joinCheck.checked = d.enabled; });
+};
+
+fetch('/api/lang_get').then(r => r.json()).then(d => applyLang(d.lang || 'ja'));
+
+setInterval(poll, 1000);
+poll();
+</script>
+</body>
+</html>
+"""
 class AppServer:
     def __init__(self):
         self.state = SharedState()
