@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>404 | ページが見つかりません</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;700;900&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink: #14132b;
+    --ink-2: #1d1b3d;
+    --paper: #ece9ff;
+    --dim: #8d89b8;
+    --pink: #ff5c8a;
+    --violet: #7a5cff;
+    --x: 50%;
+    --y: 40%;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--ink);
+    color: var(--paper);
+    font-family: "Zen Kaku Gothic New", "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo, sans-serif;
+    overflow: hidden;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+  }
+
+  /* 暗闇の中でカーソルが照らす部分だけ色づく */
+  .stage {
+    position: relative;
+    width: min(100%, 980px);
+    text-align: center;
+    isolation: isolate;
+  }
+  .num {
+    position: relative;
+    font-weight: 900;
+    font-size: clamp(7rem, 30vw, 20rem);
+    line-height: .9;
+    letter-spacing: -.04em;
+    user-select: none;
+  }
+  .num span { display: block; }
+  .num .base {
+    color: transparent;
+    -webkit-text-stroke: 1.5px #3a376b;
+  }
+  .num .lit {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(100deg, var(--violet), var(--pink));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    -webkit-mask-image: radial-gradient(circle 220px at var(--x) var(--y), #000 0%, rgba(0,0,0,.55) 45%, transparent 100%);
+    mask-image: radial-gradient(circle 220px at var(--x) var(--y), #000 0%, rgba(0,0,0,.55) 45%, transparent 100%);
+  }
+  .glow {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: -1;
+    background: radial-gradient(circle 360px at var(--x) var(--y), rgba(122,92,255,.22), transparent 70%);
+  }
+
+  .msg { margin-top: clamp(20px, 4vh, 40px); }
+  h1 {
+    font-size: clamp(1.4rem, 3.6vw, 2rem);
+    font-weight: 700;
+    letter-spacing: .04em;
+  }
+  p {
+    margin: 12px auto 0;
+    max-width: 30em;
+    color: var(--dim);
+    line-height: 1.9;
+    font-size: .95rem;
+  }
+  .path {
+    display: inline-block;
+    max-width: 100%;
+    margin-top: 18px;
+    padding: 6px 14px;
+    border: 1px solid #34316a;
+    border-radius: 999px;
+    color: var(--paper);
+    font-size: .85rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: top;
+  }
+
+  .back {
+    display: inline-block;
+    margin-top: 32px;
+    padding: 14px 36px;
+    border-radius: 999px;
+    background: var(--paper);
+    color: var(--ink);
+    font-weight: 700;
+    font-size: 1rem;
+    letter-spacing: .06em;
+    text-decoration: none;
+    transition: background .2s, color .2s, transform .2s;
+  }
+  .back:hover { background: var(--pink); color: #fff; transform: translateY(-2px); }
+  .back:active { transform: translateY(0); }
+  .back:focus-visible { outline: 3px solid var(--pink); outline-offset: 4px; }
+
+  @media (hover: none) { .num .lit, .glow { transition: none; } }
+  @media (prefers-reduced-motion: reduce) { .back { transition: none; } }
+</style>
+</head>
+<body>
+  <div class="glow" aria-hidden="true"></div>
+  <main class="stage">
+    <div class="num" aria-hidden="true">
+      <span class="base">404</span>
+      <span class="lit">404</span>
+    </div>
+    <div class="msg">
+      <h1>ページが見つかりません</h1>
+      <p>お探しのページは移動または削除されたか、URLが間違っている可能性があります。</p>
+      <span class="path" id="path"></span><br>
+      <a class="back" href="../index.html">トップに戻る</a>
+    </div>
+  </main>
+
+<script>
+  (function () {
+    var root = document.documentElement;
+    var pathEl = document.getElementById('path');
+    try { pathEl.textContent = decodeURIComponent(location.pathname + location.search); }
+    catch (e) { pathEl.textContent = location.pathname; }
+
+    var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    var tx = innerWidth / 2, ty = innerHeight * .4, cx = tx, cy = ty;
+    var pointerSeen = false, t = 0;
+
+    function setPos(x, y) {
+      root.style.setProperty('--x', x + 'px');
+      root.style.setProperty('--y', y + 'px');
+    }
+    // マスクは .lit 要素基準なので、要素内座標に変換する
+    var lit = document.querySelector('.num');
+    function toLocal(x, y) {
+      var r = lit.getBoundingClientRect();
+      return [x - r.left, y - r.top];
+    }
+    function apply(x, y) {
+      var p = toLocal(x, y);
+      root.style.setProperty('--x', p[0] + 'px');
+      // glow は fixed なので画面座標
+      document.querySelector('.glow').style.setProperty('--x', x + 'px');
+      document.querySelector('.glow').style.setProperty('--y', y + 'px');
+      root.style.setProperty('--y', p[1] + 'px');
+    }
+
+    addEventListener('pointermove', function (e) { pointerSeen = true; tx = e.clientX; ty = e.clientY; });
+    addEventListener('touchmove', function (e) {
+      var tc = e.touches[0]; pointerSeen = true; tx = tc.clientX; ty = tc.clientY;
+    }, { passive: true });
+
+    function frame() {
+      if (!pointerSeen && !reduce) {
+        t += .012;
+        var r = lit.getBoundingClientRect();
+        tx = r.left + r.width * (.5 + .38 * Math.sin(t));
+        ty = r.top + r.height * (.5 + .25 * Math.sin(t * 1.7));
+      }
+      cx += (tx - cx) * .12;
+      cy += (ty - cy) * .12;
+      apply(cx, cy);
+      requestAnimationFrame(frame);
+    }
+    if (reduce) {
+      var r0 = lit.getBoundingClientRect();
+      apply(r0.left + r0.width / 2, r0.top + r0.height / 2);
+    } else {
+      frame();
+    }
+  })();
+</script>
+</body>
+</html>
